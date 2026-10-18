@@ -21,7 +21,7 @@ import (
 	"github.com/mryuvraj1/ipv8/internal/app"
 )
 
-const version = "0.1.0"
+var version = "dev"
 
 type agentConfig struct {
 	Server string `json:"server"`
@@ -65,11 +65,19 @@ func usage() {
 func serve() error {
 	addr := env("IPV8_ADDR", "127.0.0.1:8080")
 	data := env("IPV8_DATA", "./data/ipv8.json")
+	publicURL, apiURL := os.Getenv("IPV8_PUBLIC_URL"), os.Getenv("IPV8_API_URL")
 	secure := strings.EqualFold(os.Getenv("IPV8_COOKIE_SECURE"), "true")
 	if value := os.Getenv("IPV8_COOKIE_SECURE"); value != "" && !strings.EqualFold(value, "true") && !strings.EqualFold(value, "false") {
 		return errors.New("IPV8_COOKIE_SECURE must be true or false")
 	}
-	a, err := app.New(data, secure)
+	hasPublicHTTPS := strings.HasPrefix(strings.ToLower(strings.TrimSpace(publicURL)), "https://") || strings.HasPrefix(strings.ToLower(strings.TrimSpace(apiURL)), "https://")
+	if hasPublicHTTPS {
+		if strings.EqualFold(os.Getenv("IPV8_COOKIE_SECURE"), "false") {
+			return errors.New("IPV8_COOKIE_SECURE=false is unsafe when IPV8_PUBLIC_URL uses HTTPS")
+		}
+		secure = true
+	}
+	a, err := app.NewWithOptions(data, secure, publicURL, apiURL)
 	if err != nil {
 		return err
 	}
@@ -115,7 +123,7 @@ func enroll(args []string) error {
 	if err != nil {
 		return err
 	}
-	body, _ := json.Marshal(map[string]string{"token": *token, "name": *name, "platform": runtime.GOOS + "/" + runtime.GOARCH})
+	body, _ := json.Marshal(map[string]string{"token": *token, "name": *name, "platform": runtime.GOOS + "/" + runtime.GOARCH, "version": version})
 	req, err := http.NewRequest(http.MethodPost, base+"/api/installations/enroll", bytes.NewReader(body))
 	if err != nil {
 		return err

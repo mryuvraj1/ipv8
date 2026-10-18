@@ -20,6 +20,8 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -35,6 +37,8 @@ type App struct {
 	path         string
 	db           database
 	cookieSecure bool
+	publicURL    string
+	apiURL       string
 	rates        *rateLimiter
 }
 
@@ -49,6 +53,25 @@ type rateWindow struct {
 }
 
 func New(dataPath string, cookieSecure bool) (*App, error) {
+	return NewWithOptions(dataPath, cookieSecure, "", "")
+}
+
+func NewWithOptions(dataPath string, cookieSecure bool, publicURL, apiURL string) (*App, error) {
+	var err error
+	publicURL, err = normalizePublicURL(publicURL)
+	if err != nil {
+		return nil, fmt.Errorf("IPV8_PUBLIC_URL: %w", err)
+	}
+	apiURL, err = normalizePublicURL(apiURL)
+	if err != nil {
+		return nil, fmt.Errorf("IPV8_API_URL: %w", err)
+	}
+	if publicURL == "" && apiURL != "" {
+		return nil, errors.New("IPV8_API_URL requires IPV8_PUBLIC_URL to be configured")
+	}
+	if publicURL != "" && apiURL != "" && publicURL != apiURL {
+		return nil, errors.New("IPV8_PUBLIC_URL and IPV8_API_URL must match for the current same-origin panel")
+	}
 	path, err := filepath.Abs(dataPath)
 	if err != nil {
 		return nil, err
@@ -72,13 +95,25 @@ func New(dataPath string, cookieSecure bool) (*App, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &App{path: path, db: db, cookieSecure: cookieSecure, rates: &rateLimiter{windows: map[string]rateWindow{}}}, nil
+	a := &App{path: path, cookieSecure: cookieSecure, publicURL: publicURL, apiURL: apiURL, rates: &rateLimiter{windows: map[string]rateWindow{}}}
+	changed, err := migrateAddresses(&db)
+	if err != nil {
+		return nil, fmt.Errorf("migrate IPv8 addresses: %w", err)
+	}
+	if changed {
+		if err := a.save(db); err != nil {
+			return nil, fmt.Errorf("save migrated IPv8 addresses: %w", err)
+		}
+	}
+	a.db = db
+	return a, nil
 }
 
 func (a *App) Handler() http.Handler {
 	m := http.NewServeMux()
 	m.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, 200, map[string]any{"status": "ok"}) })
 	m.HandleFunc("GET /api/branding", a.getBranding)
+	m.HandleFunc("GET /api/runtime-config", a.runtimeConfig)
 	m.Handle("POST /api/register", a.limit(8, a.register))
 	m.Handle("POST /api/login", a.limit(10, a.userLogin))
 	m.Handle("POST /api/admin/login", a.limit(10, a.adminLogin))
@@ -88,12 +123,15 @@ func (a *App) Handler() http.Handler {
 	m.HandleFunc("POST /api/address", a.generateAddress)
 	m.HandleFunc("GET /api/config", a.getConfig)
 	m.HandleFunc("POST /api/simulate", a.simulate)
-	m.HandleFunc("POST /api/installations/token", a.newEnrollment)
+	m.Handle("POST /api/installations/token", a.limit(10, a.newEnrollment))
 	m.HandleFunc("GET /api/installations", a.listInstallations)
+	m.HandleFunc("GET /api/my-ipv8", a.myIPv8)
 	m.HandleFunc("DELETE /api/installations/{id}", a.deleteInstallation)
 	m.Handle("POST /api/installations/enroll", a.limit(12, a.enroll))
 	m.Handle("POST /api/agent/heartbeat", a.limit(60, a.heartbeat))
 	m.HandleFunc("GET /api/admin/overview", a.adminOverview)
+	m.HandleFunc("GET /api/admin/nodes", a.adminNodes)
+	m.HandleFunc("GET /api/admin/nodes/{id}", a.adminNode)
 	m.HandleFunc("GET /api/admin/users", a.adminUsers)
 	m.HandleFunc("PATCH /api/admin/users/{id}", a.updateUserStatus)
 	m.HandleFunc("PATCH /api/admin/branding", a.updateBranding)
@@ -124,6 +162,29 @@ func securityHeaders(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+func normalizePublicURL(raw string) (string, error) {
+	raw = strings.TrimRight(strings.TrimSpace(raw), "/")
+	if raw == "" {
+		return "", nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" || u.User != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" || (u.Scheme != "https" && u.Scheme != "http") {
+		return "", errors.New("must be an HTTP(S) origin without credentials, path, query, or fragment")
+	}
+	if u.Scheme == "http" && u.Hostname() != "localhost" && u.Hostname() != "127.0.0.1" && u.Hostname() != "::1" {
+		return "", errors.New("HTTPS is required except for localhost prototypes")
+	}
+	return u.String(), nil
+}
+
+func (a *App) runtimeConfig(w http.ResponseWriter, _ *http.Request) {
+	apiURL := a.apiURL
+	if apiURL == "" {
+		apiURL = a.publicURL
+	}
+	writeJSON(w, 200, map[string]string{"publicURL": a.publicURL, "apiURL": apiURL})
 }
 
 func (a *App) limit(max int, next http.HandlerFunc) http.Handler {
@@ -197,6 +258,7 @@ func validEmail(value string) (string, error) {
 
 var validName = regexp.MustCompile(`^[^\x00-\x1f\x7f]{1,60}$`)
 var validPlatform = regexp.MustCompile(`^[a-zA-Z0-9._/-]{1,40}$`)
+var validVersion = regexp.MustCompile(`^[a-zA-Z0-9.+_-]{1,32}$`)
 
 func validateImage(value string) (string, error) {
 	if value == "" {
@@ -435,32 +497,79 @@ func (a *App) generateAddress(w http.ResponseWriter, r *http.Request) {
 			u = saved
 			return nil
 		}
-		for tries := 0; tries < 10; tries++ {
-			addr, err := core.GenerateAddress()
-			if err != nil {
-				return err
-			}
-			unique := true
-			for _, other := range db.Users {
-				if other.Address == addr.String() {
-					unique = false
-					break
-				}
-			}
-			if unique {
-				saved.Address = addr.String()
-				db.Users[u.ID] = saved
-				u = saved
-				return nil
+		used := make(map[string]struct{}, len(db.Users))
+		for _, other := range db.Users {
+			if other.Address != "" {
+				used[other.Address] = struct{}{}
 			}
 		}
-		return errors.New("address collision limit reached")
+		addr, err := allocateAddress(used, core.GenerateAddress)
+		if err != nil {
+			return err
+		}
+		saved.Address = addr.String()
+		db.Users[u.ID] = saved
+		u = saved
+		return nil
 	})
 	if err != nil {
 		writeError(w, 500, "could not generate address")
 		return
 	}
 	writeJSON(w, 200, map[string]string{"address": u.Address})
+}
+
+func allocateAddress(used map[string]struct{}, generate func() (core.Address, error)) (core.Address, error) {
+	for range 10 {
+		address, err := generate()
+		if err != nil {
+			return core.Address{}, err
+		}
+		if address.Reserved() {
+			continue
+		}
+		if _, exists := used[address.String()]; !exists {
+			return address, nil
+		}
+	}
+	return core.Address{}, errors.New("address collision limit reached")
+}
+
+func migrateAddresses(db *database) (bool, error) {
+	ids := make([]string, 0, len(db.Users))
+	for id := range db.Users {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	used := make(map[string]struct{}, len(db.Users))
+	var pending []string
+	for _, id := range ids {
+		user := db.Users[id]
+		if user.Address == "" {
+			continue
+		}
+		parsed, err := core.ParseAddress(user.Address)
+		if err != nil || parsed.String() != user.Address {
+			pending = append(pending, id)
+			continue
+		}
+		if _, exists := used[user.Address]; exists {
+			pending = append(pending, id)
+			continue
+		}
+		used[user.Address] = struct{}{}
+	}
+	for _, id := range pending {
+		address, err := allocateAddress(used, core.GenerateAddress)
+		if err != nil {
+			return false, err
+		}
+		user := db.Users[id]
+		user.Address = address.String()
+		db.Users[id] = user
+		used[user.Address] = struct{}{}
+	}
+	return len(pending) > 0, nil
 }
 
 func (a *App) getConfig(w http.ResponseWriter, r *http.Request) {
@@ -534,14 +643,15 @@ func (a *App) newEnrollment(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) enroll(w http.ResponseWriter, r *http.Request) {
-	var in struct{ Token, Name, Platform string }
+	var in struct{ Token, Name, Platform, Version string }
 	if decodeJSON(w, r, &in) != nil || len(in.Token) > 128 {
 		writeError(w, 400, "invalid enrollment request")
 		return
 	}
 	name := strings.TrimSpace(in.Name)
 	platform := strings.TrimSpace(in.Platform)
-	if !validName.MatchString(name) || !validPlatform.MatchString(platform) {
+	version := strings.TrimSpace(in.Version)
+	if !validName.MatchString(name) || !validPlatform.MatchString(platform) || (version != "" && !validVersion.MatchString(version)) {
 		writeError(w, 400, "valid installation name and platform are required")
 		return
 	}
@@ -555,7 +665,7 @@ func (a *App) enroll(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, "could not enroll installation")
 		return
 	}
-	inst := Installation{ID: id, Name: name, Platform: platform, Secret: tokenHash(secret), CreatedAt: time.Now().UTC()}
+	inst := Installation{ID: id, Name: name, Platform: platform, Version: version, Secret: tokenHash(secret), CreatedAt: time.Now().UTC()}
 	err = a.change(func(db *database) error {
 		key := tokenHash(in.Token)
 		enrollment, exists := db.Enrollments[key]
@@ -622,13 +732,39 @@ func (a *App) listInstallations(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"installations": list})
 }
 
-func installationView(i Installation) map[string]any {
-	return map[string]any{"id": i.ID, "name": i.Name, "platform": i.Platform, "createdAt": i.CreatedAt, "lastSeen": i.LastSeen, "status": func() string {
-		if !i.LastSeen.IsZero() && time.Since(i.LastSeen) <= 90*time.Second {
-			return "online"
+func (a *App) myIPv8(w http.ResponseWriter, r *http.Request) {
+	u, ok := a.require(w, r, "user")
+	if !ok {
+		return
+	}
+	list := make([]map[string]any, 0)
+	status := "not_installed"
+	for _, i := range a.snapshot().Installations {
+		if i.UserID != u.ID {
+			continue
 		}
-		return "offline"
-	}()}
+		view := installationView(i)
+		list = append(list, view)
+		if status == "not_installed" {
+			status = "offline"
+		}
+		if view["status"] == "online" {
+			status = "online"
+		}
+	}
+	writeJSON(w, 200, map[string]any{"status": status, "installations": list})
+}
+
+func installationView(i Installation) map[string]any {
+	return map[string]any{"id": i.ID, "name": i.Name, "platform": i.Platform, "agentVersion": i.Version, "createdAt": i.CreatedAt, "lastSeen": i.LastSeen, "status": installationStatus(i.LastSeen, time.Now())}
+}
+
+func installationStatus(lastSeen, now time.Time) string {
+	age := now.Sub(lastSeen)
+	if !lastSeen.IsZero() && age >= 0 && age <= 90*time.Second {
+		return "online"
+	}
+	return "offline"
 }
 
 func (a *App) deleteInstallation(w http.ResponseWriter, r *http.Request) {
@@ -666,11 +802,75 @@ func (a *App) adminOverview(w http.ResponseWriter, r *http.Request) {
 	db := a.snapshot()
 	online := 0
 	for _, i := range db.Installations {
-		if !i.LastSeen.IsZero() && time.Since(i.LastSeen) <= 90*time.Second {
+		if installationStatus(i.LastSeen, time.Now()) == "online" {
 			online++
 		}
 	}
-	writeJSON(w, 200, map[string]int{"users": len(db.Users), "installations": len(db.Installations), "online": online})
+	writeJSON(w, 200, map[string]int{"users": len(db.Users), "installations": len(db.Installations), "online": online, "offline": len(db.Installations) - online})
+}
+
+func (a *App) adminNodes(w http.ResponseWriter, r *http.Request) {
+	if _, ok := a.require(w, r, "admin"); !ok {
+		return
+	}
+	limit, offset := 50, 0
+	var err error
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		limit, err = strconv.Atoi(raw)
+		if err != nil || limit < 1 || limit > 100 {
+			writeError(w, 400, "limit must be from 1 to 100")
+			return
+		}
+	}
+	if raw := r.URL.Query().Get("offset"); raw != "" {
+		offset, err = strconv.Atoi(raw)
+		if err != nil || offset < 0 || offset > 1000000 {
+			writeError(w, 400, "offset must be from 0 to 1000000")
+			return
+		}
+	}
+	db := a.snapshot()
+	items := make([]Installation, 0, len(db.Installations))
+	for _, item := range db.Installations {
+		items = append(items, item)
+	}
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].CreatedAt.Equal(items[j].CreatedAt) {
+			return items[i].ID < items[j].ID
+		}
+		return items[i].CreatedAt.After(items[j].CreatedAt)
+	})
+	total := len(items)
+	if offset >= total {
+		items = items[:0]
+	} else {
+		items = items[offset:]
+		if len(items) > limit {
+			items = items[:limit]
+		}
+	}
+	nodes := make([]map[string]any, 0, len(items))
+	for _, item := range items {
+		nodes = append(nodes, adminNodeView(item, db.Users[item.UserID]))
+	}
+	writeJSON(w, 200, map[string]any{"nodes": nodes, "total": total, "limit": limit, "offset": offset})
+}
+
+func (a *App) adminNode(w http.ResponseWriter, r *http.Request) {
+	if _, ok := a.require(w, r, "admin"); !ok {
+		return
+	}
+	db := a.snapshot()
+	item, exists := db.Installations[r.PathValue("id")]
+	if !exists {
+		writeError(w, 404, "node not found")
+		return
+	}
+	writeJSON(w, 200, map[string]any{"node": adminNodeView(item, db.Users[item.UserID])})
+}
+
+func adminNodeView(i Installation, user User) map[string]any {
+	return map[string]any{"id": i.ID, "address": user.Address, "name": i.Name, "user": user.Email, "platform": i.Platform, "agentVersion": i.Version, "createdAt": i.CreatedAt, "lastSeen": i.LastSeen, "status": installationStatus(i.LastSeen, time.Now())}
 }
 
 func (a *App) adminUsers(w http.ResponseWriter, r *http.Request) {

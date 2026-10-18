@@ -23,6 +23,9 @@ jobs:
       - run: test -z "$(gofmt -l cmd internal web)"
       - run: go vet ./...
       - run: go test -race ./...
-      - run: go build -o /tmp/ipv8 ./cmd/ipv8
+      - run: go build ./...
+      - run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /tmp/ipv8-linux-amd64 ./cmd/ipv8
+      - run: CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o /tmp/ipv8-linux-arm64 ./cmd/ipv8
       - run: sh -n install.sh
+      - run: sh -n deploy/configure-cloudflare.sh
       - run: node --check web/app.js

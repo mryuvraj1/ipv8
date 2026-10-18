@@ -45,6 +45,7 @@ type Installation struct {
 	UserID    string    `json:"userId"`
 	Name      string    `json:"name"`
 	Platform  string    `json:"platform"`
+	Version   string    `json:"agentVersion,omitempty"`
 	Secret    string    `json:"secretHash"`
 	LastSeen  time.Time `json:"lastSeen,omitempty"`
 	CreatedAt time.Time `json:"createdAt"`

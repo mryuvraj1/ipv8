@@ -2,78 +2,93 @@
 
 ## Architecture and folders
 
-This is a dependency-free Go module (`github.com/mryuvraj1/ipv8`, Go 1.24+). A single Go process serves the API, static panel, and health endpoint.
+IPv8 is a dependency-free Go module (Go 1.24+). One process serves the API, embedded panel assets, and `/healthz` at `IPV8_ADDR` (default `127.0.0.1:8080`). The browser is vanilla JavaScript/CSS, uses same-origin JSON `fetch`, and needs no Node build step.
 
 ```text
-cmd/ipv8/          CLI entry point: server, admin bootstrap, enrollment, agent
-internal/app/      HTTP handlers, authentication, JSON persistence, rate limits
-internal/core/     IPv8 v1 address and packet codecs
-web/               HTML, CSS, and JavaScript embedded into the server binary
-install.sh         Linux systemd agent installer
-SPECIFICATION.md   Address and packet format, reserved values, and limits
+cmd/ipv8/                  Server, bootstrap-admin, enrollment CLI, heartbeat agent
+internal/app/              HTTP API, auth, rate limits, JSON store, address allocation
+internal/core/             256-bit address codec and v2 packet codec
+web/                       Embedded HTML, CSS, JavaScript dashboard
+packaging/ipv8-agent.service Hardened systemd unit for the user agent
+install.sh                 Interactive Linux installer for release assets
+deploy/configure-cloudflare.sh Secure token-file and Cloudflare Tunnel service setup
+.github/workflows/         Go/JS/shell CI and tagged Linux release workflow
+SPECIFICATION.md           Canonical address and packet formats
+DEPLOYMENT.md              Cloudflare Tunnel configuration and diagnostics
 ```
 
-`web/files.go` embeds the panel assets into the binary. The browser uses same-origin `fetch()` requests with JSON bodies and an HttpOnly session cookie. `GET /api/branding` is public; account, address, simulator, and installation endpoints require a session. `GET /healthz` returns a small readiness response.
+## Browser/API contract
 
-## Storage and configuration
+`web/app.js` calls the Go service via same-origin `/api/*` requests and receives the HttpOnly session cookie. The API and frontend currently must use one origin; split origins and CORS are not supported. `GET /api/runtime-config` exposes configured public and API origins only, never secrets. The install wizard creates a one-use enrollment token through `POST /api/installations/token` and forms a terminal command using the configured public URL. It cannot execute software on the user's machine and reports no installation success until the real agent sends a heartbeat.
 
-The server persists state as one JSON file at `IPV8_DATA` (default `./data/ipv8.json`). It stores users and password hashes, sessions as token hashes, addresses, one-time enrollment-token hashes, installation-secret hashes and timestamps, plus platform branding. Mutations are serialized under a process mutex, written to a mode-0600 temporary file, synced, and atomically renamed. Newly created parent directories use mode 0700.
+Key routes:
 
-The file is designed for one server process on one host. There is no cross-process locking, replication, encryption at rest, or database migration framework. Stop the server before copying the file for backup. The service reads `IPV8_ADDR` (default `127.0.0.1:8080`), `IPV8_DATA`, and `IPV8_COOKIE_SECURE` (default `false`). It does not read `.env`; shell or service configuration must export the values. See `.env.example` for placeholders.
+- `GET /api/branding`, `GET /api/runtime-config`, `GET /healthz`: public branding, nonsecret runtime URLs, readiness.
+- `POST /api/register`, `/api/login`, `/api/admin/login`, `/api/logout`, `GET /api/me`, `PATCH /api/me`: account/session/profile.
+- `POST /api/address`, `GET /api/config`, `POST /api/simulate`: address allocation and local packet loopback.
+- `GET /api/my-ipv8`, `GET /api/installations`, `DELETE /api/installations/{id}`: only the signed-in user's node data and revocation.
+- `POST /api/installations/token`, `/api/installations/enroll`, `/api/agent/heartbeat`: short-lived enrollment and credential-authenticated agent heartbeat.
+- `GET /api/admin/overview`, `GET /api/admin/nodes?limit=&offset=`, `GET /api/admin/nodes/{id}`, `GET /api/admin/users`, `PATCH /api/admin/users/{id}`, `PATCH /api/admin/branding`: admin-only overview, paginated inventory, details, account management, and branding.
 
-## Authentication and permissions
+All access checks happen in Go handlers. A user cannot request another account's installation; admin-only routes reject regular users. Admin node records include owner email and node metadata, so they are restricted to admins. Node history is not retained.
 
-Public registration always creates role `user`; request fields cannot select a role. There is no public admin registration. An administrator is created once using `IPV8_ADMIN_EMAIL` and `IPV8_ADMIN_PASSWORD` with `ipv8 bootstrap-admin`; passwords must be at least 14 characters for this command. Passwords are stored as PBKDF2-HMAC-SHA-256 hashes (600,000 iterations, 16-byte random salt, 32-byte result).
+## Database and authentication
 
-User and admin login have separate endpoints (`/api/login` and `/api/admin/login`) and verify both password and role. Login returns a random 256-bit opaque cookie; only its SHA-256 hash is stored. The cookie is HttpOnly, SameSite=Strict, expires after 12 hours, and gains the Secure attribute when `IPV8_COOKIE_SECURE=true`. Logout deletes the stored token hash. The handler rejects mismatched `Origin` hosts and does not enable CORS. Registration, login, enrollment, and heartbeat endpoints have per-process fixed-window rate limits.
+`IPV8_DATA` points to one JSON file. It holds account profile and password hash, sessions as hashed opaque tokens, address assignments, one-use enrollment token hashes, installation-secret hashes, installation name/platform/version/timestamps, and platform branding. Writes are mutex-serialized, atomically replaced, synced, and use restrictive file permissions. The JSON database supports one server process on one host; it does not have cross-process locking, replication, encryption at rest, or multi-host uniqueness.
 
-Backend handlers enforce roles. Users can update only their own display name/avatar, get their one stored address, manage their installations, and run the own-address loopback simulator. Admin-only overview, user-directory, branding, and user-status endpoints require an admin session. Admins can suspend or restore regular users; suspension invalidates their sessions, pending enrollments, and installed agents, and administrators cannot be suspended through this API. Public responses omit password hashes. Image uploads are embedded PNG/JPEG data, limited to 128 KiB, and their image dimensions are bounded before storage.
+Public registration always makes a user role. Admin registration is disabled. Create the first administrator with `IPV8_ADMIN_EMAIL` and `IPV8_ADMIN_PASSWORD` for `go run ./cmd/ipv8 bootstrap-admin`; the command refuses if an admin already exists. Password hashing is PBKDF2-HMAC-SHA-256 (600,000 iterations, 16-byte random salt, 32-byte result). Session cookies are HttpOnly, SameSite=Strict, 12-hour, and Secure for HTTPS deployments. Registration, login, enrollment token creation, enrollment, and heartbeats have in-process rate limits. Request bodies are limited, JSON unknown fields are rejected, and the API does not enable CORS.
 
-## Address generation and parsing
+`IPV8_PUBLIC_URL` and `IPV8_API_URL` are optional HTTP(S) origins. Remote use requires HTTPS; when configured for deployment they must match. The app never reads `.env`; put only nonsecret app settings in the panel service environment. `CLOUDFLARE_TUNNEL_TOKEN` is handled only by the separate tunnel helper and must not enter the Go service environment.
 
-`internal/core/address.go` generates 16 bytes with `crypto/rand`. The canonical text is `ipv8:1:` followed by 26 lowercase, unpadded RFC 4648 Base32 characters, exactly 33 ASCII bytes overall. Parsing checks the prefix, length, alphabet, reserved values, decoded length, and canonical re-encoding. All-zero and all-`0xff` values are reserved.
+## IPv8 address allocation
 
-When a user first requests an address, `internal/app` checks generated values against every stored user address while holding the state mutex and persists the selected value. Each user gets one stable address. Uniqueness applies only to a single intact JSON database handled by one process; separately operated instances do not coordinate.
+`internal/core/address.go` encodes 32-byte values (256 bits) using uppercase unpadded RFC 4648 Base32, grouped as 13 four-character groups after `ipv8:`. Parsing requires the exact prefix/grouping/alphabet and canonical zero pad bits. All-zero and all-`0xff` are reserved. Generation uses `crypto/rand`; the app checks collisions against persisted accounts and retries before atomically assigning. Capacity is `2^256 - 2`, and the random birthday collision chance is negligible at the intended scale. Uniqueness is only within one intact database and allocator; there is no cross-service/global uniqueness or routing guarantee. Old noncanonical stored values are replaced with new valid addresses during startup migration; valid unique values are retained.
 
-## Packet processing and simulator
+See [SPECIFICATION.md](SPECIFICATION.md) for complete bits, grouping, reserved values, packet header offsets, and checks.
 
-`internal/core/packet.go` implements the 72-byte header and SHA-256 corruption check described in `SPECIFICATION.md`. The decoder validates magic, version, flags, source/destination identifiers, payload length, exact frame length, and checksum before returning a packet. Payloads are capped at 1200 bytes.
+## Packet processing and measurements
 
-`POST /api/simulate` accepts a user's own generated address and a payload. The server encodes a packet from that address to itself, decodes and validates the encoded bytes, then returns the delivered payload and packet size. This is an in-process loopback demonstration; the code does not open a packet socket, route between users, authenticate packet senders, or encrypt payloads. The checksum is not a security signature.
+`internal/core/packet.go` implements packet version 2 with a 104-byte header, 32-byte source/destination IDs, 16-bit payload length, SHA-256 corruption check, and a maximum 1200-byte payload. Decoding rejects unsupported versions, reserved addresses, invalid lengths, trailing bytes, and checksum errors. The hash is not a signature.
 
-## Installation and heartbeat behavior
+`POST /api/simulate` accepts only a user's own address, encodes then decodes a packet to itself, and returns it inside the same process. There is no socket transport, route, peer discovery, forwarding, or public connectivity. Therefore the admin panel reports no node-to-node RTT, jitter, loss, bandwidth, traffic counters, geolocation, measurement history, or network map. These are explicitly unmeasured, not synthesized from heartbeat intervals. An authenticated heartbeat measures agent-to-panel reachability only.
 
-`POST /api/installations/token` issues a random 256-bit token, stores only its hash, expires it after 15 minutes, and invalidates any older unused token for that account. `POST /api/installations/enroll` consumes the token once and returns a random installation ID and secret. The server stores only a hash of the secret; the client writes it to `/etc/ipv8/agent.json` with mode 0600.
+## Enrollment and Linux installer
 
-The agent posts the ID and secret to `/api/agent/heartbeat` immediately and every 30 seconds over HTTPS (plain HTTP is accepted only for localhost prototypes). It does not follow HTTP redirects for enrollment or heartbeats, because those requests contain credentials; configure the canonical panel URL in the enrollment command. The panel calls an installation online when its last authenticated heartbeat is within 90 seconds. Removing an installation deletes its server credential, so the agent is rejected on its next heartbeat. No route, firewall, interface, or DNS configuration is changed.
+The user requests a token from the authenticated panel. The database stores its hash; it expires after 15 minutes, can be used once, and a new request invalidates the prior pending token for that user. Enrollment returns a unique node ID and 256-bit secret once; the server stores only the secret hash. The agent stores its secret in `/etc/ipv8/agent.json` mode `0600`. The systemd service uses `DynamicUser` and `LoadCredential` to provide it only at runtime. Heartbeats happen immediately and every 30 seconds over HTTPS; redirects are not followed. Status is Online when a matching authenticated heartbeat was received within 90 seconds, Offline otherwise, and Not Installed when the account has no node.
 
-The installer supports Debian, Ubuntu, Fedora, and Arch Linux with systemd on amd64 and arm64. It checks prerequisites, downloads the repository source archive over HTTPS, and builds the Go binary. It writes only its own `/usr/local/bin/ipv8`, `/etc/ipv8/agent.json`, and `ipv8-agent.service` paths; it refuses to overwrite an unrelated unit and validates an existing regular, private agent config without following symlinks. Enrollment is written before replacing the installed binary, so after the config has been saved, an interrupted installation can resume by rerunning with that config. If enrollment fails before saving the config, issue a fresh one-time token. The installer requires Go 1.24+, `curl`, and `tar` to be installed already.
+A tagged release workflow builds checksum-manifested `linux/amd64` and `linux/arm64` assets plus the service unit. `install.sh` supports Debian, Ubuntu, Fedora, Arch Linux, systemd 247+, and those architectures. It checks root, platform, systemd, dependencies, safe target paths, then prompts for experimental terms and confirms reviewed node details. It fetches the selected architecture and service unit from the latest GitHub Release and verifies both against `SHA256SUMS` before enrollment/install. Existing enrollment config is not overwritten on rerun. It does not change routes, DNS, or firewall settings. `--dry-run` performs host/configuration checks and prints intent without network downloads, token consumption, or writes.
 
-## Local commands and verification
+Release assets do not exist until a `v*` tag is pushed and the GitHub Release workflow succeeds. A missing release makes installation fail before enrollment or service changes. After the release publishes, the panel gives the exact command with the configured real HTTPS endpoint and single-use token. The installer requires an interactive terminal for explicit terms acceptance and system-change confirmation (it reads `/dev/tty` when piped to `sudo sh`).
+
+## Cloudflare Tunnel deployment
+
+The app's single origin remains bound to `127.0.0.1:8080`; configure a Cloudflare published hostname to service `http://127.0.0.1:8080`. Set the same real public HTTPS origin in `IPV8_PUBLIC_URL` and `IPV8_API_URL`, set Secure cookies, restart the Go service, and verify local and public `/healthz` endpoints. `deploy/configure-cloudflare.sh` accepts `CLOUDFLARE_TUNNEL_TOKEN` only via environment, refuses to replace existing credentials/service units, writes `/etc/ipv8/cloudflared-token` mode 0600, and installs a systemd service that uses `--token-file` and systemd credentials. It requires cloudflared 2025.4.0+ and does not install cloudflared itself. The tunnel token never reaches the browser, the agent, or app API. See [DEPLOYMENT.md](DEPLOYMENT.md) for dashboard routes, token rotation, service management, and 502 diagnosis.
+
+## Theme and UI
+
+The panel uses a custom CSS variable theme with dark/light modes and an OS-following setting, stored in browser local storage. The mobile sidebar is a keyboard-dismissible drawer. Overview values are returned by real account/install APIs; the Admin Network Overview and node detail pages show actual accounts, registrations, platform/version and heartbeat timestamps. The UI labels unavailable metrics rather than displaying sample values. User location, password changes, notification history, and server-side session management are not implemented and are not requested by the UI.
+
+## Local development and checks
 
 ```sh
-cp .env.example .env # edit placeholders first; .env is not loaded automatically
-set -a
-. ./.env
-set +a
-go run ./cmd/ipv8 bootstrap-admin
-unset IPV8_ADMIN_PASSWORD
+cp .env.example .env # reference only, Go does not load this file
 go run ./cmd/ipv8 serve
 ```
 
-To run automated checks:
+Open `http://127.0.0.1:8080`, register a user, then generate an address. For an administrator, export email/password just for `go run ./cmd/ipv8 bootstrap-admin`, then unset both. To use a custom data file or listen address, export `IPV8_DATA` or `IPV8_ADDR` before starting the process.
+
+Run checks:
 
 ```sh
 gofmt -w cmd internal web
+go test ./...
 go vet ./...
-go test -race ./...
-go build -o ./ipv8 ./cmd/ipv8
+go build ./...
 sh -n install.sh
+sh -n deploy/configure-cloudflare.sh
 node --check web/app.js
 ```
 
-The integration test exercises registration, user/admin login separation, admin-only APIs, profile changes, branding persistence after restart, address generation and uniqueness, packet simulation validation, one-time enrollment, heartbeat status, installation ownership, logout, and login after logout.
+CI additionally runs `go test -race ./...` on GitHub-hosted Linux. Tests cover address canonicalization, reserved values, collision allocation/migration, packet validation/roundtrip, user/admin access, enrollment, invalid and valid heartbeats, status freshness, revocation, persistence, agent config permissions, redirect handling, URL configuration, and Cloudflare installer script syntax.
 
-## Contributing
-
-Run the checks above and add tests for behavior changes. Keep the specification and UI claims synchronized with what the server actually implements. Never add secrets or local database files to Git. See `CONTRIBUTING.md` for the short pull-request checklist.
+Contributions should keep documentation in sync, run these checks, and avoid committing `.env`, the local database, agent credentials, or Cloudflare tunnel credentials. See [CONTRIBUTING.md](CONTRIBUTING.md).
