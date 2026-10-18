@@ -121,7 +121,7 @@ func enroll(args []string) error {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	client := &http.Client{Timeout: 15 * time.Second}
+	client := agentHTTPClient(15 * time.Second)
 	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("enrollment request failed: %w", err)
@@ -184,7 +184,7 @@ func runAgent(args []string) error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := agentHTTPClient(10 * time.Second)
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 	for {
@@ -226,6 +226,17 @@ func heartbeat(ctx context.Context, client *http.Client, cfg agentConfig) error 
 		return fmt.Errorf("server returned %s", resp.Status)
 	}
 	return nil
+}
+
+func agentHTTPClient(timeout time.Duration) *http.Client {
+	return &http.Client{
+		Timeout: timeout,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			// Enrollment tokens and installation secrets are sent in request bodies.
+			// Never forward them to a redirect target on another origin.
+			return http.ErrUseLastResponse
+		},
+	}
 }
 
 func readAgentConfig(path string) (agentConfig, error) {
