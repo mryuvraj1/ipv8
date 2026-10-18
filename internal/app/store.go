@@ -19,6 +19,7 @@ type User struct {
 	DisplayName string    `json:"displayName"`
 	Avatar      string    `json:"avatar,omitempty"`
 	Role        string    `json:"role"`
+	Disabled    bool      `json:"disabled"`
 	Address     string    `json:"address,omitempty"`
 	Password    string    `json:"passwordHash,omitempty"`
 	CreatedAt   time.Time `json:"createdAt"`

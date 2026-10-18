@@ -57,7 +57,8 @@ async function renderDashboard() {
   if (isAdmin) {
     const [overview, userResult] = await Promise.all([api('/api/admin/overview'), api('/api/admin/users')]);
     state.admin = overview; state.users = userResult.users || [];
-    shell('Admin overview', `<div class="eyebrow">Control plane</div><h2 class="page-title">Platform overview</h2><p class="sub">Manage persistent platform branding and review account activity.</p><div class="grid"><article class="card third"><span class="eyebrow">Accounts</span><h2 style="font-size:30px;margin-top:10px">${overview.users}</h2><p>Registered user accounts</p></article><article class="card third"><span class="eyebrow">Installations</span><h2 style="font-size:30px;margin-top:10px">${overview.installations}</h2><p>Enrolled local agents</p></article><article class="card third"><span class="eyebrow">Online now</span><h2 style="font-size:30px;margin-top:10px">${overview.online}</h2><p>Heartbeat seen in the last 90 seconds</p></article><article class="card wide"><h2>Registered users</h2><p>Private account directory for administrators.</p><div class="table-scroll"><table class="table"><thead><tr><th>Display name</th><th>Email</th><th>Address</th><th>Created</th></tr></thead><tbody>${state.users.length ? state.users.map(u => `<tr><td>${esc(u.displayName)}</td><td>${esc(u.email)}</td><td class="mono">${esc(u.address || 'Not generated')}</td><td>${esc(new Date(u.createdAt).toLocaleDateString())}</td></tr>`).join('') : '<tr><td colspan="4">No registered accounts.</td></tr>'}</tbody></table></div></article></div>`);
+    shell('Admin overview', `<div class="eyebrow">Control plane</div><h2 class="page-title">Platform overview</h2><p class="sub">Manage persistent platform branding and review account activity.</p><div class="grid"><article class="card third"><span class="eyebrow">Accounts</span><h2 style="font-size:30px;margin-top:10px">${overview.users}</h2><p>Registered user accounts</p></article><article class="card third"><span class="eyebrow">Installations</span><h2 style="font-size:30px;margin-top:10px">${overview.installations}</h2><p>Enrolled local agents</p></article><article class="card third"><span class="eyebrow">Online now</span><h2 style="font-size:30px;margin-top:10px">${overview.online}</h2><p>Heartbeat seen in the last 90 seconds</p></article><article class="card wide"><h2>Registered users</h2><p>Suspending a user revokes their sessions, pending enrollments, and agents.</p><div class="table-scroll"><table class="table"><thead><tr><th>Display name</th><th>Email</th><th>Address</th><th>Created</th><th>Access</th><th></th></tr></thead><tbody>${state.users.length ? state.users.map(u => `<tr><td>${esc(u.displayName)}</td><td>${esc(u.email)}</td><td class="mono">${esc(u.address || 'Not generated')}</td><td>${esc(new Date(u.createdAt).toLocaleDateString())}</td><td>${u.role === 'admin' ? 'Administrator' : u.disabled ? 'Suspended' : 'Active'}</td><td>${u.role === 'user' ? `<button class="button ${u.disabled ? 'secondary' : 'danger'} small user-toggle" data-id="${esc(u.id)}" data-disabled="${u.disabled}">${u.disabled ? 'Restore' : 'Suspend'}</button>` : 'Protected'}</td></tr>`).join('') : '<tr><td colspan="6">No registered accounts.</td></tr>'}</tbody></table></div></article></div>`);
+    wireAdminUsers();
     return;
   }
   const [config, installs] = await Promise.all([api('/api/config'), api('/api/installations')]);
@@ -71,6 +72,26 @@ async function renderDashboard() {
   document.querySelector('#make-token')?.addEventListener('click', async e => { e.currentTarget.disabled = true; try { const r = await api('/api/installations/token', { method: 'POST', body: '{}' }); state.token = r.token; const command = `curl -fsSL https://raw.githubusercontent.com/mryuvraj1/ipv8/main/install.sh | sudo sh -s -- --server ${shellQuote(location.origin)} --token ${shellQuote(r.token)}`; document.querySelector('#install-command').innerHTML = `<pre class="mono" id="install-command-value">${esc(command)}</pre><button class="button secondary small" id="copy-install-command">Copy command</button><div class="caption" style="margin-top:8px">Expires ${esc(new Date(r.expiresAt).toLocaleTimeString())} · single use</div>`; document.querySelector('#copy-install-command').addEventListener('click', () => copy(command)); } catch (error) { toast(error.message, 'error'); } finally { e.currentTarget.disabled = false; } });
   document.querySelector('#refresh-installations')?.addEventListener('click', async () => { const r = await api('/api/installations'); state.installs = r.installations || []; document.querySelector('#install-list').innerHTML = renderInstallations(); wireRevoke(); });
   wireRevoke();
+}
+
+function wireAdminUsers() {
+  document.querySelectorAll('.user-toggle').forEach(button => button.addEventListener('click', async () => {
+    const disabled = button.dataset.disabled === 'true';
+    if (!disabled && !confirm('Suspend this user? Their sessions, pending enrollments, and enrolled agents will be revoked.')) return;
+    button.disabled = true;
+    try {
+      const result = await api(`/api/admin/users/${encodeURIComponent(button.dataset.id)}`, { method: 'PATCH', body: json({ disabled: !disabled }) });
+      state.users = state.users.map(user => user.id === result.user.id ? result.user : user);
+      button.dataset.disabled = String(result.user.disabled);
+      button.textContent = result.user.disabled ? 'Restore' : 'Suspend';
+      button.classList.toggle('danger', !result.user.disabled);
+      button.classList.toggle('secondary', result.user.disabled);
+      button.closest('tr').children[4].textContent = result.user.disabled ? 'Suspended' : 'Active';
+      button.disabled = false;
+      toast(disabled ? 'User restored; they must sign in again' : 'User suspended and access revoked');
+      renderDashboard().catch(error => toast(`User updated, but dashboard refresh failed: ${error.message}`, 'error'));
+    } catch (error) { toast(error.message, 'error'); button.disabled = false; }
+  }));
 }
 
 function renderInstallations() {

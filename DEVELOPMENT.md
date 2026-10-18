@@ -27,7 +27,7 @@ Public registration always creates role `user`; request fields cannot select a r
 
 User and admin login have separate endpoints (`/api/login` and `/api/admin/login`) and verify both password and role. Login returns a random 256-bit opaque cookie; only its SHA-256 hash is stored. The cookie is HttpOnly, SameSite=Strict, expires after 12 hours, and gains the Secure attribute when `IPV8_COOKIE_SECURE=true`. Logout deletes the stored token hash. The handler rejects mismatched `Origin` hosts and does not enable CORS. Registration, login, enrollment, and heartbeat endpoints have per-process fixed-window rate limits.
 
-Backend handlers enforce roles. Users can update only their own display name/avatar, get their one stored address, manage their installations, and run the own-address loopback simulator. Admin-only overview, user-directory, and branding endpoints require an admin session. Public responses omit password hashes. Image uploads are embedded PNG/JPEG data, limited to 128 KiB, and their image dimensions are bounded before storage.
+Backend handlers enforce roles. Users can update only their own display name/avatar, get their one stored address, manage their installations, and run the own-address loopback simulator. Admin-only overview, user-directory, branding, and user-status endpoints require an admin session. Admins can suspend or restore regular users; suspension invalidates their sessions, pending enrollments, and installed agents, and administrators cannot be suspended through this API. Public responses omit password hashes. Image uploads are embedded PNG/JPEG data, limited to 128 KiB, and their image dimensions are bounded before storage.
 
 ## Address generation and parsing
 

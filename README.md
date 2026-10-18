@@ -1,6 +1,6 @@
 # IPv8
 
-IPv8 is an open-source Go prototype for an experimental address format, packet envelope, web panel, and heartbeat-only Linux agent. **Addresses are local identifiers: there is no packet transport, public routing, or IPv4/IPv6 replacement.** See [SPECIFICATION.md](SPECIFICATION.md) for the implemented format and limits.
+IPv8 is an open-source Go prototype for an experimental address format, packet envelope, web panel, and heartbeat-only Linux agent. The panel supports separate user/admin access, address generation, user suspension, profile settings, and persistent platform branding. **Addresses are local identifiers: there is no packet transport, public routing, or IPv4/IPv6 replacement.** See [SPECIFICATION.md](SPECIFICATION.md) for the implemented format and limits.
 
 ## Requirements
 

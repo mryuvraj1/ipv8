@@ -94,6 +94,12 @@ func TestUserAdminFlowAndPersistence(t *testing.T) {
 	if secondReg.Code != 200 {
 		t.Fatalf("second register: %d %s", secondReg.Code, secondReg.Body)
 	}
+	var secondUserResponse struct {
+		User User `json:"user"`
+	}
+	if err := json.Unmarshal(secondReg.Body.Bytes(), &secondUserResponse); err != nil || secondUserResponse.User.ID == "" {
+		t.Fatalf("decode second account: %v", err)
+	}
 	secondAddress := request(t, second, server.URL, "POST", "/api/address", map[string]any{})
 	var secondAddr struct {
 		Address string `json:"address"`
@@ -102,6 +108,22 @@ func TestUserAdminFlowAndPersistence(t *testing.T) {
 	if addr.Address == secondAddr.Address {
 		t.Fatal("addresses are not unique")
 	}
+	secondTokenResponse := request(t, second, server.URL, "POST", "/api/installations/token", map[string]any{})
+	var secondToken struct {
+		Token string `json:"token"`
+	}
+	_ = json.Unmarshal(secondTokenResponse.Body.Bytes(), &secondToken)
+	secondEnrollment := request(t, newClient(t), server.URL, "POST", "/api/installations/enroll", map[string]string{"token": secondToken.Token, "name": "Other laptop", "platform": "linux/amd64"})
+	var secondInstall struct{ ID, Secret string }
+	_ = json.Unmarshal(secondEnrollment.Body.Bytes(), &secondInstall)
+	if secondEnrollment.Code != 201 || secondInstall.ID == "" {
+		t.Fatalf("second installation enroll: %d %s", secondEnrollment.Code, secondEnrollment.Body)
+	}
+	pendingResponse := request(t, second, server.URL, "POST", "/api/installations/token", map[string]any{})
+	var pendingToken struct {
+		Token string `json:"token"`
+	}
+	_ = json.Unmarshal(pendingResponse.Body.Bytes(), &pendingToken)
 
 	enrollment := request(t, user, server.URL, "POST", "/api/installations/token", map[string]any{})
 	var token struct {
@@ -151,6 +173,10 @@ func TestUserAdminFlowAndPersistence(t *testing.T) {
 	if userBranding.Code != 403 {
 		t.Fatalf("user changed admin branding: status %d", userBranding.Code)
 	}
+	userStatusChange := request(t, user, server.URL, "PATCH", "/api/admin/users/"+secondUserResponse.User.ID, map[string]bool{"disabled": true})
+	if userStatusChange.Code != 403 {
+		t.Fatalf("user changed another account status: %d", userStatusChange.Code)
+	}
 	branding := request(t, admin, server.URL, "PATCH", "/api/admin/branding", map[string]string{"name": "Northstar IPv8", "logo": avatar})
 	if branding.Code != 200 {
 		t.Fatalf("branding update: %d %s", branding.Code, branding.Body)
@@ -189,8 +215,8 @@ func TestUserAdminFlowAndPersistence(t *testing.T) {
 	if got := reopened.snapshot().Users[userResponse.User.ID].Address; got != addr.Address {
 		t.Fatal("generated address did not persist")
 	}
-	if len(reopened.snapshot().Installations) != 1 {
-		t.Fatal("installation did not persist")
+	if len(reopened.snapshot().Installations) != 2 {
+		t.Fatal("installations did not persist")
 	}
 
 	loggedIn := newClient(t)
@@ -205,6 +231,49 @@ func TestUserAdminFlowAndPersistence(t *testing.T) {
 	rejectedHeartbeat := request(t, newClient(t), restarted.URL, "POST", "/api/agent/heartbeat", install)
 	if rejectedHeartbeat.Code != 401 {
 		t.Fatalf("revoked agent heartbeat status %d", rejectedHeartbeat.Code)
+	}
+	adminID := ""
+	for id, account := range reopened.snapshot().Users {
+		if account.Role == "admin" {
+			adminID = id
+		}
+	}
+	if adminID == "" {
+		t.Fatal("bootstrapped administrator not found")
+	}
+	selfSuspend := request(t, admin, restarted.URL, "PATCH", "/api/admin/users/"+adminID, map[string]bool{"disabled": true})
+	if selfSuspend.Code != 403 {
+		t.Fatalf("administrator suspension status %d", selfSuspend.Code)
+	}
+	missingStatus := request(t, admin, restarted.URL, "PATCH", "/api/admin/users/"+secondUserResponse.User.ID, map[string]string{})
+	if missingStatus.Code != 400 {
+		t.Fatalf("missing disabled field status %d", missingStatus.Code)
+	}
+	suspended := request(t, admin, restarted.URL, "PATCH", "/api/admin/users/"+secondUserResponse.User.ID, map[string]bool{"disabled": true})
+	if suspended.Code != 200 || !strings.Contains(suspended.Body.String(), `"disabled":true`) {
+		t.Fatalf("suspend user: %d %s", suspended.Code, suspended.Body)
+	}
+	if got := request(t, second, restarted.URL, "GET", "/api/me", nil).Code; got != 401 {
+		t.Fatalf("suspended session status %d", got)
+	}
+	if got := request(t, newClient(t), restarted.URL, "POST", "/api/login", map[string]string{"email": "other@example.com", "password": secondPassword}).Code; got != 401 {
+		t.Fatalf("suspended login status %d", got)
+	}
+	if got := request(t, newClient(t), restarted.URL, "POST", "/api/agent/heartbeat", secondInstall).Code; got != 401 {
+		t.Fatalf("suspended installation heartbeat status %d", got)
+	}
+	if got := request(t, newClient(t), restarted.URL, "POST", "/api/installations/enroll", map[string]string{"token": pendingToken.Token, "name": "Late device", "platform": "linux/amd64"}).Code; got != 401 {
+		t.Fatalf("suspended enrollment token status %d", got)
+	}
+	restored := request(t, admin, restarted.URL, "PATCH", "/api/admin/users/"+secondUserResponse.User.ID, map[string]bool{"disabled": false})
+	if restored.Code != 200 || !strings.Contains(restored.Body.String(), `"disabled":false`) {
+		t.Fatalf("restore user: %d %s", restored.Code, restored.Body)
+	}
+	if got := request(t, second, restarted.URL, "GET", "/api/me", nil).Code; got != 401 {
+		t.Fatalf("restored user's old session became active: %d", got)
+	}
+	if got := request(t, newClient(t), restarted.URL, "POST", "/api/login", map[string]string{"email": "other@example.com", "password": secondPassword}).Code; got != 200 {
+		t.Fatalf("restored user login status %d", got)
 	}
 }
 

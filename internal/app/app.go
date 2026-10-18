@@ -95,6 +95,7 @@ func (a *App) Handler() http.Handler {
 	m.Handle("POST /api/agent/heartbeat", a.limit(60, a.heartbeat))
 	m.HandleFunc("GET /api/admin/overview", a.adminOverview)
 	m.HandleFunc("GET /api/admin/users", a.adminUsers)
+	m.HandleFunc("PATCH /api/admin/users/{id}", a.updateUserStatus)
 	m.HandleFunc("PATCH /api/admin/branding", a.updateBranding)
 	files := http.FileServer(http.FS(web.Files))
 	m.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
@@ -231,7 +232,7 @@ func (a *App) userBySession(r *http.Request) (User, bool) {
 		return User{}, false
 	}
 	u, ok := db.Users[s.UserID]
-	return u, ok
+	return u, ok && !u.Disabled
 }
 
 func (a *App) require(w http.ResponseWriter, r *http.Request, role string) (User, bool) {
@@ -326,10 +327,11 @@ func (a *App) login(w http.ResponseWriter, r *http.Request, role string) {
 			break
 		}
 	}
-	if found.ID == "" || !verifyPassword(in.Password, found.Password) {
-		if found.ID == "" {
-			_ = verifyPassword(in.Password, "pbkdf2-sha256$600000$AAAAAAAAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
-		}
+	hash := found.Password
+	if found.ID == "" || found.Disabled {
+		hash = "pbkdf2-sha256$600000$AAAAAAAAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+	}
+	if !verifyPassword(in.Password, hash) || found.ID == "" || found.Disabled {
 		writeError(w, 401, "email or password is incorrect")
 		return
 	}
@@ -344,6 +346,11 @@ func (a *App) createSession(w http.ResponseWriter, u User) {
 	}
 	expiry := time.Now().Add(sessionDuration)
 	if err := a.change(func(db *database) error {
+		current, exists := db.Users[u.ID]
+		if !exists || current.Disabled || current.Role != u.Role {
+			return errUnauthorized
+		}
+		u = current
 		for k, s := range db.Sessions {
 			if time.Now().After(s.Expiry) {
 				delete(db.Sessions, k)
@@ -351,7 +358,10 @@ func (a *App) createSession(w http.ResponseWriter, u User) {
 		}
 		db.Sessions[tokenHash(token)] = Session{UserID: u.ID, Expiry: expiry}
 		return nil
-	}); err != nil {
+	}); errors.Is(err, errUnauthorized) {
+		writeError(w, 401, "account is unavailable")
+		return
+	} else if err != nil {
 		writeError(w, 500, "could not start session")
 		return
 	}
@@ -674,6 +684,64 @@ func (a *App) adminUsers(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, 200, map[string]any{"users": users})
 }
+
+func (a *App) updateUserStatus(w http.ResponseWriter, r *http.Request) {
+	if _, ok := a.require(w, r, "admin"); !ok {
+		return
+	}
+	var in struct {
+		Disabled *bool `json:"disabled"`
+	}
+	if decodeJSON(w, r, &in) != nil || in.Disabled == nil {
+		writeError(w, 400, "disabled must be a boolean")
+		return
+	}
+	id := r.PathValue("id")
+	err := a.change(func(db *database) error {
+		u, exists := db.Users[id]
+		if !exists {
+			return errNotFound
+		}
+		if u.Role != "user" {
+			return errForbidden
+		}
+		u.Disabled = *in.Disabled
+		db.Users[id] = u
+		if u.Disabled {
+			for key, session := range db.Sessions {
+				if session.UserID == id {
+					delete(db.Sessions, key)
+				}
+			}
+			for key, enrollment := range db.Enrollments {
+				if enrollment.UserID == id {
+					delete(db.Enrollments, key)
+				}
+			}
+			for key, installation := range db.Installations {
+				if installation.UserID == id {
+					delete(db.Installations, key)
+				}
+			}
+		}
+		return nil
+	})
+	if errors.Is(err, errNotFound) {
+		writeError(w, 404, "user not found")
+		return
+	}
+	if errors.Is(err, errForbidden) {
+		writeError(w, 403, "administrators cannot be suspended here")
+		return
+	}
+	if err != nil {
+		writeError(w, 500, "could not update user status")
+		return
+	}
+	writeJSON(w, 200, map[string]any{"user": publicUser(a.snapshot().Users[id])})
+}
+
+var errNotFound = errors.New("not found")
 
 func (a *App) updateBranding(w http.ResponseWriter, r *http.Request) {
 	if _, ok := a.require(w, r, "admin"); !ok {
