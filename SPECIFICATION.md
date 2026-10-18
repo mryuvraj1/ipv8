@@ -28,6 +28,19 @@ The address space contains `2^256 - 2` assignable values after reserving the two
 
 The panel stores at most one assigned address per user in its persistent JSON database. Under the database mutation lock it checks all existing assignments and retries on a collision before writing the new address. This enforces uniqueness within one intact database operated by one server process. Independently operated or copied databases do not coordinate. Existing addresses from the previous prototype format are replaced with newly generated 256-bit addresses at startup and persisted; valid canonical 256-bit addresses are preserved.
 
+## DNS TXT metadata
+
+IPv8 DNS metadata uses a conventional TXT record at `_ipv8.<domain>`. The record value is application-defined and versioned; it does not introduce a DNS RR type:
+
+```text
+v=ipv8-1; address=ipv8:<canonical-256-bit-address>
+v=ipv8-1; address=ipv8:<canonical-256-bit-address>; expires=YYYY-MM-DDTHH:MM:SSZ
+```
+
+The second line is the optional-expiration form. Expiry is strict UTC whole seconds; the record is invalid at or after that instant. A verifier queries the absolute TXT owner `_ipv8.<lowercase-domain>.`, validates exactly one IPv8 record, parses the canonical address above, and compares it with the expected address. Unrelated TXT values are ignored. Duplicate IPv8 values, malformed fields, unsupported versions, invalid addresses, and expired values fail closed. The DNS provider's TTL is unchanged. The application keeps no DNS cache; it relies on the operating system/configured recursive resolver, while Go's standard TXT lookup does not expose TTL to the app.
+
+DNS control only shows that a zone currently publishes a value. This format has no signature and is not independently bound to an IPv8 account, key, or identity. DNS metadata does not create a transport, route, or reachability guarantee. See [DNS.md](DNS.md) for provider instructions and the admin verification flow.
+
 ## Packet format
 
 The prototype packet is a binary envelope used only by the local loopback simulator. All multibyte integer fields use network byte order. Packet version 2 carries the 256-bit address format. No packet transport, forwarding, public routing, sender authentication, or encryption is implemented.

@@ -47,7 +47,7 @@ curl -fsS http://127.0.0.1:8080/healthz
 curl -fsS https://panel.example.com/healthz
 ```
 
-The application process should itself be managed by a persistent service manager and retain its `IPV8_DATA` volume. This repository does not install or manage the host's Go panel service. Cloudflare Tunnel publishes web requests; it does not provide IPv8 packet forwarding, VPN connectivity, or node-to-node transport.
+The interactive MOTD installer can manage the Go panel service on Debian, Ubuntu, Fedora, or Arch Linux with systemd 247+ (menu options 1, 3, 5, 6, 10, and 11). It binds to loopback, writes its validated systemd environment to `/etc/ipv8/panel.env`, and preserves `/var/lib/ipv8/ipv8.json` by default. It does not load `.env` or create an administrator. The service can also be configured manually as described above. Cloudflare Tunnel publishes web requests; it does not provide IPv8 packet forwarding, VPN connectivity, or node-to-node transport.
 
 ## Troubleshooting
 

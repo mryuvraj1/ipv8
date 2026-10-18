@@ -39,7 +39,7 @@ func main() {
 	case "serve":
 		err = serve()
 	case "bootstrap-admin":
-		err = bootstrapAdmin()
+		err = bootstrapAdmin(os.Args[2:])
 	case "enroll":
 		err = enroll(os.Args[2:])
 	case "agent":
@@ -59,7 +59,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: ipv8 serve | bootstrap-admin | enroll | agent | check-config | version")
+	fmt.Fprintln(os.Stderr, "usage: ipv8 serve | bootstrap-admin [--password-stdin] | enroll --server URL --token-stdin | agent | check-config | version")
 }
 
 func serve() error {
@@ -86,10 +86,25 @@ func serve() error {
 	return s.ListenAndServe()
 }
 
-func bootstrapAdmin() error {
+func bootstrapAdmin(args []string) error {
+	f := flag.NewFlagSet("bootstrap-admin", flag.ContinueOnError)
+	passwordStdin := f.Bool("password-stdin", false, "read the administrator password from stdin")
+	if err := f.Parse(args); err != nil {
+		return err
+	}
+	if f.NArg() != 0 {
+		return errors.New("bootstrap-admin accepts no positional arguments")
+	}
 	email, password := os.Getenv("IPV8_ADMIN_EMAIL"), os.Getenv("IPV8_ADMIN_PASSWORD")
+	if *passwordStdin {
+		b, err := io.ReadAll(io.LimitReader(os.Stdin, 257))
+		if err != nil || len(b) > 256 {
+			return errors.New("could not read administrator password from stdin")
+		}
+		password = string(b)
+	}
 	if email == "" || password == "" {
-		return errors.New("set IPV8_ADMIN_EMAIL and IPV8_ADMIN_PASSWORD for this command")
+		return errors.New("set IPV8_ADMIN_EMAIL and provide IPV8_ADMIN_PASSWORD or --password-stdin")
 	}
 	a, err := app.New(env("IPV8_DATA", "./data/ipv8.json"), false)
 	if err != nil {
@@ -105,14 +120,22 @@ func bootstrapAdmin() error {
 func enroll(args []string) error {
 	f := flag.NewFlagSet("enroll", flag.ContinueOnError)
 	server := f.String("server", "", "IPv8 panel base URL")
-	token := f.String("token", "", "short-lived one-time enrollment token")
+	tokenStdin := f.Bool("token-stdin", false, "read the one-time enrollment token from stdin")
 	name := f.String("name", hostname(), "installation display name")
 	configPath := f.String("config", "/etc/ipv8/agent.json", "agent configuration path")
 	if err := f.Parse(args); err != nil {
 		return err
 	}
-	if *token == "" || *name == "" {
-		return errors.New("--token and --name are required")
+	if !*tokenStdin {
+		return errors.New("--token-stdin is required; enrollment tokens are not accepted as command-line arguments")
+	}
+	b, err := io.ReadAll(io.LimitReader(os.Stdin, 129))
+	if err != nil || len(b) > 128 {
+		return errors.New("could not read enrollment token from stdin")
+	}
+	token := strings.TrimSpace(string(b))
+	if len(token) < 16 || len(token) > 128 || *name == "" {
+		return errors.New("an enrollment token of 16–128 characters and a node name are required")
 	}
 	if _, err := os.Lstat(*configPath); err == nil {
 		return fmt.Errorf("configuration already exists at %s; it was not changed", *configPath)
@@ -123,7 +146,7 @@ func enroll(args []string) error {
 	if err != nil {
 		return err
 	}
-	body, _ := json.Marshal(map[string]string{"token": *token, "name": *name, "platform": runtime.GOOS + "/" + runtime.GOARCH, "version": version})
+	body, _ := json.Marshal(map[string]string{"token": token, "name": *name, "platform": runtime.GOOS + "/" + runtime.GOARCH, "version": version})
 	req, err := http.NewRequest(http.MethodPost, base+"/api/installations/enroll", bytes.NewReader(body))
 	if err != nil {
 		return err
@@ -144,7 +167,7 @@ func enroll(args []string) error {
 		return errors.New("server returned an invalid enrollment response")
 	}
 	conf := agentConfig{Server: base, ID: answer.ID, Secret: answer.Secret}
-	b, _ := json.MarshalIndent(conf, "", "  ")
+	configData, _ := json.MarshalIndent(conf, "", "  ")
 	if err := os.MkdirAll(filepath.Dir(*configPath), 0700); err != nil {
 		return err
 	}
@@ -152,7 +175,7 @@ func enroll(args []string) error {
 	if err != nil {
 		return fmt.Errorf("write config without overwriting an existing file: %w", err)
 	}
-	if _, err := fh.Write(b); err != nil {
+	if _, err := fh.Write(configData); err != nil {
 		fh.Close()
 		_ = os.Remove(*configPath)
 		return err

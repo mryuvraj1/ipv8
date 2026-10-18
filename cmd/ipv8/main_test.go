@@ -11,7 +11,29 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/mryuvraj1/ipv8/internal/app"
 )
+
+func TestBootstrapAdminReadsPasswordFromStdin(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "panel.json")
+	t.Setenv("IPV8_DATA", path)
+	t.Setenv("IPV8_ADMIN_EMAIL", "owner@example.com")
+	t.Setenv("IPV8_ADMIN_PASSWORD", "")
+	restore := testStdin(t, "a-long-test-password-123")
+	err := bootstrapAdmin([]string{"--password-stdin"})
+	restore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := app.New(path, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.BootstrapAdmin("another@example.com", "another-long-test-password-123"); err == nil {
+		t.Fatal("bootstrap unexpectedly allowed a second administrator")
+	}
+}
 
 func TestAgentClientDoesNotForwardCredentialsOnRedirect(t *testing.T) {
 	var targetRequests atomic.Int32
@@ -67,8 +89,11 @@ func TestEnrollmentConfigAndAuthenticatedHeartbeat(t *testing.T) {
 	defer server.Close()
 
 	config := filepath.Join(t.TempDir(), "agent.json")
-	if err := enroll([]string{"--server", server.URL, "--token", "single-use-token", "--name", "test-host", "--config", config}); err != nil {
-		t.Fatal(err)
+	restore := testStdin(t, "single-use-token")
+	enrollErr := enroll([]string{"--server", server.URL, "--token-stdin", "--name", "test-host", "--config", config})
+	restore()
+	if enrollErr != nil {
+		t.Fatal(enrollErr)
 	}
 	info, err := os.Stat(config)
 	if err != nil || info.Mode().Perm() != 0600 {
@@ -84,9 +109,27 @@ func TestEnrollmentConfigAndAuthenticatedHeartbeat(t *testing.T) {
 	if enrollments.Load() != 1 || heartbeats.Load() != 1 {
 		t.Fatalf("enrollment/heartbeat counts = %d/%d", enrollments.Load(), heartbeats.Load())
 	}
-	if err := enroll([]string{"--server", server.URL, "--token", "another-token", "--name", "test-host", "--config", config}); err == nil {
+	restore = testStdin(t, "another-one-time-token")
+	enrollErr = enroll([]string{"--server", server.URL, "--token-stdin", "--name", "test-host", "--config", config})
+	restore()
+	if enrollErr == nil {
 		t.Fatal("enrollment overwrote an existing credential file")
 	}
+}
+
+func testStdin(t *testing.T, input string) func() {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Write([]byte(input)); err != nil {
+		t.Fatal(err)
+	}
+	_ = w.Close()
+	old := os.Stdin
+	os.Stdin = r
+	return func() { os.Stdin = old; _ = r.Close() }
 }
 
 func TestReadAgentConfigRequiresPrivateRegularFile(t *testing.T) {
@@ -117,6 +160,12 @@ func TestReadAgentConfigRequiresPrivateRegularFile(t *testing.T) {
 	}
 	if _, err := readAgentConfig(dir); err == nil {
 		t.Fatal("accepted a directory as agent configuration")
+	}
+}
+
+func TestEnrollmentTokenIsNotAcceptedOnCommandLine(t *testing.T) {
+	if err := enroll([]string{"--server", "https://panel.example", "--token", "long-one-time-token"}); err == nil {
+		t.Fatal("accepted an enrollment token as a command-line argument")
 	}
 }
 

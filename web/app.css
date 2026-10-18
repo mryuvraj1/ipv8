@@ -815,4 +815,13 @@ body { background: var(--bg); color: var(--text) }
 .metric-heading { display: flex; align-items: center; justify-content: space-between; margin-top: 20px }
 .metric-heading h3 { font-size: 15px; margin: 0 }
 .node-row[hidden] { display: none }
-@media(max-width:720px) { .node-filters { grid-template-columns: 1fr } }
+.dns-card { display: grid; gap: 12px }
+.dns-verify-form { display: grid; grid-template-columns: minmax(170px,.7fr) minmax(280px,1.5fr) auto; align-items: end; gap: 12px }
+.dns-verify-form .input-wrap { margin: 0 }
+.dns-verify-form button { min-height: 42px }
+.dns-result { display: grid; gap: 5px; font-size: 13px }
+.dns-result.success { color: var(--green) }
+.dns-result.warning { color: var(--amber,#F59E0B) }
+.dns-result.error { color: var(--red) }
+.dns-result code { overflow-wrap: anywhere; color: var(--text) }
+@media(max-width:720px) { .node-filters,.dns-verify-form { grid-template-columns: 1fr } }

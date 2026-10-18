@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/mryuvraj1/ipv8/internal/core"
+	"github.com/mryuvraj1/ipv8/internal/dnsrecord"
 	"github.com/mryuvraj1/ipv8/web"
 )
 
@@ -39,6 +40,7 @@ type App struct {
 	cookieSecure bool
 	publicURL    string
 	apiURL       string
+	dnsLookup    dnsrecord.TXTLookup
 	rates        *rateLimiter
 }
 
@@ -132,6 +134,7 @@ func (a *App) Handler() http.Handler {
 	m.HandleFunc("GET /api/admin/overview", a.adminOverview)
 	m.HandleFunc("GET /api/admin/nodes", a.adminNodes)
 	m.HandleFunc("GET /api/admin/nodes/{id}", a.adminNode)
+	m.Handle("POST /api/admin/dns/verify", a.limit(5, a.verifyDNS))
 	m.HandleFunc("GET /api/admin/users", a.adminUsers)
 	m.HandleFunc("PATCH /api/admin/users/{id}", a.updateUserStatus)
 	m.HandleFunc("PATCH /api/admin/branding", a.updateBranding)
@@ -871,6 +874,44 @@ func (a *App) adminNode(w http.ResponseWriter, r *http.Request) {
 
 func adminNodeView(i Installation, user User) map[string]any {
 	return map[string]any{"id": i.ID, "address": user.Address, "name": i.Name, "user": user.Email, "platform": i.Platform, "agentVersion": i.Version, "createdAt": i.CreatedAt, "lastSeen": i.LastSeen, "status": installationStatus(i.LastSeen, time.Now())}
+}
+
+func (a *App) verifyDNS(w http.ResponseWriter, r *http.Request) {
+	if _, ok := a.require(w, r, "admin"); !ok {
+		return
+	}
+	var in struct {
+		Domain  string `json:"domain"`
+		Address string `json:"address"`
+	}
+	if decodeJSON(w, r, &in) != nil {
+		writeError(w, 400, "domain and address are required")
+		return
+	}
+	domain, err := dnsrecord.ValidateDomain(in.Domain)
+	if err != nil {
+		writeError(w, 400, "domain must be a valid ASCII DNS name")
+		return
+	}
+	address, err := core.ParseAddress(in.Address)
+	if err != nil || address.String() != in.Address {
+		writeError(w, 400, "address must be a canonical IPv8 experimental address")
+		return
+	}
+	record, err := dnsrecord.Resolve(r.Context(), domain, a.dnsLookup, time.Now())
+	if errors.Is(err, dnsrecord.ErrNotFound) {
+		writeError(w, 404, "no IPv8 TXT record found at _ipv8."+domain)
+		return
+	}
+	if errors.Is(err, dnsrecord.ErrInvalid) || errors.Is(err, dnsrecord.ErrUnsupported) || errors.Is(err, dnsrecord.ErrExpired) {
+		writeError(w, 422, err.Error())
+		return
+	}
+	if err != nil {
+		writeError(w, 502, "DNS lookup failed; check the domain and resolver, then try again")
+		return
+	}
+	writeJSON(w, 200, map[string]any{"record": record, "expectedAddress": in.Address, "verified": record.Address == in.Address})
 }
 
 func (a *App) adminUsers(w http.ResponseWriter, r *http.Request) {

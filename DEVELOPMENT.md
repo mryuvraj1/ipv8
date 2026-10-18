@@ -8,9 +8,11 @@ IPv8 is a dependency-free Go module (Go 1.24+). One process serves the API, embe
 cmd/ipv8/                  Server, bootstrap-admin, enrollment CLI, heartbeat agent
 internal/app/              HTTP API, auth, rate limits, JSON store, address allocation
 internal/core/             256-bit address codec and v2 packet codec
+internal/dnsrecord/        Strict versioned TXT parsing and bounded DNS resolution
 web/                       Embedded HTML, CSS, JavaScript dashboard
 packaging/ipv8-agent.service Hardened systemd unit for the user agent
-install.sh                 Interactive Linux installer for release assets
+install.sh                 Bash MOTD and reviewed Linux/Termux installer
+tests/installer_test.py    Pseudo-terminal menu and cancellation tests
 deploy/configure-cloudflare.sh Secure token-file and Cloudflare Tunnel service setup
 .github/workflows/         Go/JS/shell CI and tagged Linux release workflow
 SPECIFICATION.md           Canonical address and packet formats
@@ -19,7 +21,7 @@ DEPLOYMENT.md              Cloudflare Tunnel configuration and diagnostics
 
 ## Browser/API contract
 
-`web/app.js` calls the Go service via same-origin `/api/*` requests and receives the HttpOnly session cookie. The API and frontend currently must use one origin; split origins and CORS are not supported. `GET /api/runtime-config` exposes configured public and API origins only, never secrets. The install wizard creates a one-use enrollment token through `POST /api/installations/token` and forms a terminal command using the configured public URL. It cannot execute software on the user's machine and reports no installation success until the real agent sends a heartbeat.
+`web/app.js` calls the Go service via same-origin `/api/*` requests and receives the HttpOnly session cookie. The API and frontend currently must use one origin; split origins and CORS are not supported. `GET /api/runtime-config` exposes configured public and API origins only, never secrets. The install wizard creates a one-use enrollment token through `POST /api/installations/token`; it puts the panel origin and node name in the command but presents the token separately. The local installer reads the token with terminal echo disabled and forwards it to `ipv8 enroll --token-stdin`; it is not included in command arguments, logs, or agent config. The panel cannot execute software on the user's machine and reports no installation success until the real agent sends a heartbeat.
 
 Key routes:
 
@@ -29,6 +31,7 @@ Key routes:
 - `GET /api/my-ipv8`, `GET /api/installations`, `DELETE /api/installations/{id}`: only the signed-in user's node data and revocation.
 - `POST /api/installations/token`, `/api/installations/enroll`, `/api/agent/heartbeat`: short-lived enrollment and credential-authenticated agent heartbeat.
 - `GET /api/admin/overview`, `GET /api/admin/nodes?limit=&offset=`, `GET /api/admin/nodes/{id}`, `GET /api/admin/users`, `PATCH /api/admin/users/{id}`, `PATCH /api/admin/branding`: admin-only overview, paginated inventory, details, account management, and branding.
+- `POST /api/admin/dns/verify`: admin-only, rate-limited check of a domain's `_ipv8.<domain>` TXT record against an expected canonical IPv8 address.
 
 All access checks happen in Go handlers. A user cannot request another account's installation; admin-only routes reject regular users. Admin node records include owner email and node metadata, so they are restricted to admins. Node history is not retained.
 
@@ -52,13 +55,27 @@ See [SPECIFICATION.md](SPECIFICATION.md) for complete bits, grouping, reserved v
 
 `POST /api/simulate` accepts only a user's own address, encodes then decodes a packet to itself, and returns it inside the same process. There is no socket transport, route, peer discovery, forwarding, or public connectivity. Therefore the admin panel reports no node-to-node RTT, jitter, loss, bandwidth, traffic counters, geolocation, measurement history, or network map. These are explicitly unmeasured, not synthesized from heartbeat intervals. An authenticated heartbeat measures agent-to-panel reachability only.
 
-## Enrollment and Linux installer
+## Enrollment and installer
 
-The user requests a token from the authenticated panel. The database stores its hash; it expires after 15 minutes, can be used once, and a new request invalidates the prior pending token for that user. Enrollment returns a unique node ID and 256-bit secret once; the server stores only the secret hash. The agent stores its secret in `/etc/ipv8/agent.json` mode `0600`. The systemd service uses `DynamicUser` and `LoadCredential` to provide it only at runtime. Heartbeats happen immediately and every 30 seconds over HTTPS; redirects are not followed. Status is Online when a matching authenticated heartbeat was received within 90 seconds, Offline otherwise, and Not Installed when the account has no node.
+The user requests a token from the authenticated panel. The database stores its hash; it expires after 15 minutes, can be used once, and a new request invalidates the prior pending token for that user. Enrollment returns a unique node ID and 256-bit secret once; the server stores only the secret hash. The agent stores its secret in `/etc/ipv8/agent.json` mode `0600`. The systemd service uses `DynamicUser` and `LoadCredential` to provide it only at runtime. Heartbeats happen immediately and every 30 seconds over HTTPS; redirects are not followed. Status is Online when a matching authenticated heartbeat was received within 90 seconds, Offline otherwise, and Not Installed when the account has no node. The CLI `bootstrap-admin --password-stdin` can read the initial admin password from stdin so a systemd transient service can use the same DynamicUser/StateDirectory and panel environment without putting the password in an argument, file, or service environment.
 
-A tagged release workflow builds checksum-manifested `linux/amd64` and `linux/arm64` assets plus the service unit. `install.sh` supports Debian, Ubuntu, Fedora, Arch Linux, systemd 247+, and those architectures. It checks root, platform, systemd, dependencies, safe target paths, then prompts for experimental terms and confirms reviewed node details. It fetches the selected architecture and service unit from the latest GitHub Release and verifies both against `SHA256SUMS` before enrollment/install. Existing enrollment config is not overwritten on rerun. It does not change routes, DNS, or firewall settings. `--dry-run` performs host/configuration checks and prints intent without network downloads, token consumption, or writes.
+A tagged release workflow builds checksum-manifested `linux/amd64` and `linux/arm64` assets plus the service unit. `install.sh` supports Debian, Ubuntu, Fedora, and Arch Linux with systemd 247+ on those architectures. It also supports Termux on Android arm64 as a user-local source build; Termux has no system service in this installer, so users run the agent in a foreground session. Android has no release asset in the current release workflow.
 
-Release assets do not exist until a `v*` tag is pushed and the GitHub Release workflow succeeds. A missing release makes installation fail before enrollment or service changes. After the release publishes, the panel gives the exact command with the configured real HTTPS endpoint and single-use token. The installer requires an interactive terminal for explicit terms acceptance and system-change confirmation (it reads `/dev/tty` when piped to `sudo sh`).
+With no arguments `install.sh` renders a terminal-width-aware colored/plain MOTD with the IPv8 “8” mark, platform, actual binary version, and detectable managed service state. Its 12 actions install/configure/uninstall panel and agent, show service and local `/healthz` status, provide project/DNS information, check prerequisites, update the shared executable, inspect systemd logs, or exit. It does not infer authenticated heartbeat status without a panel session or fabricate network metrics. Termux explicitly disables systemd panel operations; the agent runs in the foreground there.
+
+Panel setup is supported on Debian, Ubuntu, Fedora, and Arch Linux with systemd 247+. It binds only to loopback and writes a validated `/etc/ipv8/panel.env` plus `ipv8-panel.service`. The unit uses `DynamicUser`, `StateDirectory=ipv8`, and the existing Go `serve` command; it does not create an admin account. The database defaults to `/var/lib/ipv8/ipv8.json`, which is preserved. Public URLs must be identical HTTPS origins; public access is expected through a TLS-terminating reverse proxy or Cloudflare Tunnel. Configure backs up the environment file and restarts after confirmation. Agent and panel share `/usr/local/bin/ipv8`; update refreshes that executable and restarts any managed service that was active. Uninstall removes only the selected managed unit and keeps configuration/data by default, with separate explicit cleanup prompts.
+
+Agent settings without an installed panel remain in memory only for the current menu session. The exact documented entry point is `bash <(curl -fsSL https://raw.githubusercontent.com/mryuvraj1/ipv8/main/install.sh)`; the script never relies on its source path, so it works when `$0` is a process-substitution file descriptor.
+
+The install summary includes the node name, prefix, platform, panel, credential handling, data sent, affected files, service behavior, network requirements, and privilege needs. No agent release/source, enrollment, package install, filesystem mutation, or service action happens before confirmation. The token is read from `/dev/tty` with echo disabled and passed to `ipv8 enroll --token-stdin`; it is not in arguments, logs, or agent config. On Linux, a non-root user explicitly authorizes sudo before system paths are modified; the installer does not install packages. Linux uses verified release checksums when the matching asset exists. If no matching binary exists, the script offers a Go 1.24+ source build from the repository archive over HTTPS; it discloses that GitHub source archives are not signed and builds and enrolls without root. In source mode the systemd unit is the installer's local hardened template, and the compiled agent runs as systemd's `DynamicUser`. Termux uses the source build directly and runs the agent as the current user. The installer preserves existing enrollment configuration and refuses unrelated files or symlinks. It backs up a changed IPv8-managed service unit. It changes no routes, DNS, or firewall rules. `--dry-run` checks dependencies and target paths without downloads, token use, package installation, or writes. See [README.md](README.md) for the exact dependency list and commands.
+
+Linux agent paths are `/usr/local/bin/ipv8` (or selected prefix), `/etc/ipv8/agent.json` (mode `0600`), and `/etc/systemd/system/ipv8-agent.service`. The panel adds `/etc/ipv8/panel.env` (mode `0600`), `/etc/systemd/system/ipv8-panel.service`, and `/var/lib/ipv8/ipv8.json`. Panel configuration is an explicit systemd environment file; the Go process does not automatically load `.env`. Termux paths are `$PREFIX/bin/ipv8` and `$PREFIX/etc/ipv8/agent.json`. A current `v*` tag is needed to publish release assets; until then the Linux source-build fallback requires Go 1.24+.
+
+## DNS record resolution and verification
+
+`internal/dnsrecord` accepts one strict `v=ipv8-1; address=<canonical>` TXT value, with optional strict UTC-second `expires=...`. It ignores unrelated TXT values and fails closed for duplicates, malformed values, unknown versions, invalid addresses, and expiration. Domain validation allows ASCII DNS labels and IDNA A-labels, and rejects IP literals, invalid labels, and single-label names. A trailing dot is normalized; the resolver queries `_ipv8.<domain>.` with a five-second context timeout.
+
+`POST /api/admin/dns/verify` accepts `{ "domain": "example.com", "address": "ipv8:..." }`; it requires an admin session and is limited to five requests per minute per client address. It returns the observed record and whether its address exactly matches the expected canonical address. The check is not persisted. Missing records return 404, invalid/expired records 422, bad input 400, and resolver failures 502. The app has no DNS cache; Go's standard TXT lookup omits TTL, so resolver and OS caching apply. DNS metadata has no signature and does not route IPv8 packets. See [DNS.md](DNS.md).
 
 ## Cloudflare Tunnel deployment
 
@@ -84,11 +101,12 @@ gofmt -w cmd internal web
 go test ./...
 go vet ./...
 go build ./...
-sh -n install.sh
+bash -n install.sh
 sh -n deploy/configure-cloudflare.sh
 node --check web/app.js
+python3 tests/installer_test.py -v
 ```
 
-CI additionally runs `go test -race ./...` on GitHub-hosted Linux. Tests cover address canonicalization, reserved values, collision allocation/migration, packet validation/roundtrip, user/admin access, enrollment, invalid and valid heartbeats, status freshness, revocation, persistence, agent config permissions, redirect handling, URL configuration, and Cloudflare installer script syntax.
+CI additionally runs `go test -race ./...` on GitHub-hosted Linux, cross-builds Linux amd64/arm64 and Android arm64, and runs Python pseudo-terminal tests for process substitution, menu choices, validation, and cancellation. Go tests cover address canonicalization, reserved values, collision allocation/migration, packet validation/roundtrip, DNS parsing/expiry/lookup failures and admin authorization, user/admin access, enrollment via token stdin, heartbeat validity/freshness, revocation, persistence, agent config permissions, redirect handling, URL configuration, and Cloudflare installer script syntax.
 
 Contributions should keep documentation in sync, run these checks, and avoid committing `.env`, the local database, agent credentials, or Cloudflare tunnel credentials. See [CONTRIBUTING.md](CONTRIBUTING.md).
