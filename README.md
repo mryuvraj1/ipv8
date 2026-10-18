@@ -1,88 +1,78 @@
 # IPv8
 
-Exploring New Possibilities in Network Protocol Design
+IPv8 is an open-source Go prototype for an experimental address format, packet envelope, web panel, and heartbeat-only Linux agent. **Addresses are local identifiers: there is no packet transport, public routing, or IPv4/IPv6 replacement.** See [SPECIFICATION.md](SPECIFICATION.md) for the implemented format and limits.
 
-IPv8 is an open-source experimental networking research project written in Go. It explores alternative addressing systems, packet formats, and routing concepts through a research-oriented prototype.
+## Requirements
 
-«Status: Early-stage research and development. IPv8 is not an official Internet protocol or a replacement for IPv4/IPv6.»
+- Go 1.24 or newer.
+- Linux is needed only for the optional agent installer.
+- The panel uses the Go standard library and bundled HTML/CSS/JavaScript; there are no npm dependencies.
 
-# Vision
+## Run locally
 
-Explore how a new network protocol could be designed, implemented, tested, and documented through open-source collaboration.
+```sh
+git clone https://github.com/mryuvraj1/ipv8.git
+cd ipv8
+cp .env.example .env
+# Edit .env and replace the admin password placeholder with a random password.
+set -a
+. ./.env
+set +a
+go run ./cmd/ipv8 bootstrap-admin
+unset IPV8_ADMIN_PASSWORD
+go run ./cmd/ipv8 serve
+```
 
-# Research Goals
+Open <http://127.0.0.1:8080>. Register a user at the panel or sign in as the bootstrapped administrator. The first write creates `./data/ipv8.json` with restrictive permissions. The configured database is a single-process JSON file; it needs no separate database setup. Back it up securely and stop the server before copying it.
 
-- [ ] Define an experimental address format.
-- [ ] Design a documented packet structure.
-- [ ] Implement address parsing and validation in Go.
-- [ ] Build packet encoding and decoding.
-- [ ] Create a local network simulator.
-- [ ] Explore routing and interoperability.
-- [ ] Evaluate security and design trade-offs.
-- [ ] Publish reproducible tests and documentation.
+## Configuration
 
-# Technology
+The server reads process environment variables. It does **not** automatically load `.env`.
 
-- Language: Go
-- Development: Git and GitHub
-- Testing: Go test framework
-- Focus: Networking research and protocol design
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `IPV8_ADDR` | `127.0.0.1:8080` | HTTP listen address |
+| `IPV8_DATA` | `./data/ipv8.json` | Persistent account, address, session, installation, and branding data |
+| `IPV8_COOKIE_SECURE` | `false` | Set `true` when users access the panel through HTTPS |
+| `IPV8_ADMIN_EMAIL` | unset | Required only by `bootstrap-admin` |
+| `IPV8_ADMIN_PASSWORD` | unset | Required only by `bootstrap-admin`; at least 14 characters |
 
-# Project Status
+Public admin registration is disabled. Create the first admin once with `go run ./cmd/ipv8 bootstrap-admin`; remove the admin password from the environment immediately afterward. Do not commit `.env` or the database.
 
-IPv8 is in its early research stage. Features listed in the roadmap are goals, not claims of completed functionality. Actual capabilities will be documented as they are implemented and tested.
+## Build, tests, and deployment
 
-# Contributing
+```sh
+go test -race ./...
+go vet ./...
+go build -o ./ipv8 ./cmd/ipv8
+./ipv8 serve
+```
 
-Contributions are welcome!
+For deployment, run the server behind a TLS reverse proxy, keep the Go listener on loopback where possible, set `IPV8_COOKIE_SECURE=true`, and persist the directory containing `IPV8_DATA`. The application does not configure TLS, firewall rules, or host networking. One server process must own a JSON database at a time.
 
-You can help by:
+## Install the optional agent
 
-- Improving technical documentation.
-- Reviewing protocol design proposals.
-- Writing tests and reporting reproducible bugs.
-- Contributing Go code through pull requests.
-- Discussing routing, addressing, and interoperability.
+Create a short-lived enrollment command in the user dashboard. It uses a single-use token that expires after 15 minutes. The installer supports Debian, Ubuntu, Fedora, and Arch Linux with systemd on `amd64` or `arm64`; it requires Go 1.24+, `curl`, and `tar`, and builds the agent from this repository's `main` source. The agent sends an authenticated heartbeat every 30 seconds and does not carry IPv8 packets or alter routes/firewall rules.
 
-Please review "CONTRIBUTING.md" (CONTRIBUTING.md) before submitting a pull request. Keep discussions constructive and explain the reasoning behind technical changes.
+The panel provides the exact copyable command. Its form is:
 
-# Roadmap
+```sh
+curl -fsSL https://raw.githubusercontent.com/mryuvraj1/ipv8/main/install.sh | sudo sh -s -- --server https://panel.example.com --token "$IPV8_ENROLLMENT_TOKEN"
+```
 
-## Phase 1 — Specification
+Replace the server and token with your actual panel origin and the one-time token. Keep the token private. Uninstall with:
 
-- [ ] Define design goals and terminology.
-- [ ] Document the proposed address and packet formats.
+```sh
+sudo systemctl disable --now ipv8-agent
+sudo rm /etc/systemd/system/ipv8-agent.service /usr/local/bin/ipv8 /etc/ipv8/agent.json
+sudo rmdir /etc/ipv8 # succeeds only if no unrelated files remain
+sudo systemctl daemon-reload
+```
 
-## Phase 2 — Prototype
+## Development
 
-- [ ] Implement address parsing and validation.
-- [ ] Implement packet encoding and decoding.
-- [ ] Add unit tests.
+See [DEVELOPMENT.md](DEVELOPMENT.md) for the source layout, API/authentication flow, storage model, packet processing, and contribution checks. CI runs formatting checks, Go tests with the race detector, `go vet`, a build, shell syntax validation, and the JavaScript parser check. Contributions are welcome; see [CONTRIBUTING.md](CONTRIBUTING.md).
 
-## Phase 3 — Simulation
+## License
 
-- [ ] Build a local test environment.
-- [ ] Test communication between simulated nodes.
-- [ ] Explore basic forwarding behavior.
-
-## Phase 4 — Research
-
-- [ ] Evaluate limitations and security considerations.
-- [ ] Document compatibility challenges.
-- [ ] Publish results and revise the specification.
-
-# Security
-
-IPv8 is experimental software. Do not rely on it for production networking or sensitive communications. Please report security concerns responsibly and avoid publishing sensitive information in issues.
-
-# License
-
-This project is distributed under the MIT License. See the "LICENSE" (LICENSE) file for the full terms.
-
-# Repository
-
-"github.com/mryuvraj1/ipv8" (https://github.com/mryuvraj1/ipv8)
-
----
-
-IPv8 — An open-source journey into experimental networking.
+MIT. See [LICENSE](LICENSE).
