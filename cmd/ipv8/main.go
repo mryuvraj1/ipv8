@@ -241,9 +241,12 @@ func agentHTTPClient(timeout time.Duration) *http.Client {
 
 func readAgentConfig(path string) (agentConfig, error) {
 	var cfg agentConfig
-	info, err := os.Stat(path)
+	info, err := os.Lstat(path)
 	if err != nil {
 		return cfg, fmt.Errorf("read agent config: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return cfg, errors.New("agent config must be a regular file, not a symlink")
 	}
 	if info.Mode().Perm()&0077 != 0 {
 		return cfg, errors.New("agent config permissions must be 0600 or stricter")

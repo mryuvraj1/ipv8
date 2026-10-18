@@ -40,15 +40,14 @@ case "$(uname -m)" in x86_64|amd64) ARCH=amd64 ;; aarch64|arm64) ARCH=arm64 ;; *
 CONFIG=/etc/ipv8/agent.json
 BIN=/usr/local/bin/ipv8
 UNIT=/etc/systemd/system/ipv8-agent.service
+HAD_CONFIG=0
+if [ -e "$CONFIG" ] || [ -L "$CONFIG" ]; then HAD_CONFIG=1; fi
 
-if [ -e "$BIN" ] && [ ! -e "$CONFIG" ]; then
+if [ -e "$BIN" ] && [ "$HAD_CONFIG" -eq 0 ]; then
   fail "$BIN already exists without an IPv8 agent config; refusing to overwrite an unidentified binary."
 fi
 
-if [ -e "$CONFIG" ]; then
-  [ -x "$BIN" ] || fail "$CONFIG exists but $BIN is missing; preserve the config and repair the binary manually."
-  "$BIN" check-config --config "$CONFIG" || fail "$CONFIG is invalid or has unsafe permissions; it was not changed."
-else
+if [ "$HAD_CONFIG" -eq 0 ]; then
   [ -n "$SERVER" ] && [ -n "$TOKEN" ] || fail '--server and --token are required for first enrollment.'
 fi
 
@@ -79,15 +78,19 @@ if ! (cd "$TMP/src" && CGO_ENABLED=0 GOOS=linux GOARCH="$ARCH" go build -trimpat
   fail 'Go build failed; the existing installation was left running.'
 fi
 chmod 0755 "$TMP/ipv8"
+if [ "$HAD_CONFIG" -eq 1 ]; then
+  "$TMP/ipv8" check-config --config "$CONFIG" || fail "$CONFIG is invalid or has unsafe permissions; it was not changed."
+else
+  install -d -m 0755 /etc/ipv8
+  if ! "$TMP/ipv8" enroll --server "$SERVER" --token "$TOKEN" --name "$NAME" --config "$CONFIG"; then
+    fail 'enrollment failed; no new service changes were made.'
+  fi
+fi
+
 install -m 0755 "$TMP/ipv8" "$TMP/ipv8.new"
 mv -f "$TMP/ipv8.new" "$BIN"
 install -d -m 0755 /etc/ipv8
-
-if [ ! -e "$CONFIG" ]; then
-  if ! "$BIN" enroll --server "$SERVER" --token "$TOKEN" --name "$NAME" --config "$CONFIG"; then
-    fail 'enrollment failed; no agent service was enabled.'
-  fi
-else
+if [ "$HAD_CONFIG" -eq 1 ]; then
   echo 'Keeping existing enrollment configuration.'
 fi
 
