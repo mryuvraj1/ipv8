@@ -1,6 +1,6 @@
 # IPv8 Experimental Address and Packet Specification
 
-Status: prototype specification, version 1. This is an experimental identifier and local packet envelope, not a public Internet protocol.
+Status: prototype specification, revision 2. This document defines address format version 1 and packet format version 2. This is an experimental identifier and local packet envelope, not a public Internet protocol.
 
 ## Address format
 
