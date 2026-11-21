@@ -2,11 +2,13 @@
 
 IPv8 is an open-source Go prototype for experimental 256-bit addresses, a local packet envelope/simulator, an account panel, DNS TXT metadata verification, and an optional heartbeat agent. IPv8 addresses are local identifiers: this project has no peer packet transport, public routing, VPN, or IPv4/IPv6 replacement. It does not measure RTT, bandwidth, geolocation, or traffic.
 
+Start with the [Phase 0 audit](docs/AUDIT.md) for what the current code actually implements, what is only simulated, known security and scaling limits, and the decisions still open before further work.
+
 ## Requirements and supported platforms
 
 - Go 1.24+ to run/build the panel and to build the agent from source.
 - The installer runs in Bash and requires `curl`, `tar`, `sha256sum`, `grep`, `sed`, `install`, `df`, `awk`, `mktemp`, `stty`, `cp`, `cmp`, `chmod`, `mv`, and `stat`. It does not install packages.
-- It checks for at least 20 MiB free for installation/release downloads and 100 MiB in its temporary area when building from source.
+- It checks for at least 20 MiB free for installation/release downloads and 100 MiB free in its temporary area when building from source.
 - Panel and agent service management: Debian, Ubuntu, Fedora, or Arch Linux with systemd 247+ on Linux amd64 or arm64. Root access is requested only after the full review and a separate consent prompt.
 - Termux: Android arm64 is supported as a user-local Go source build. Go 1.24+ must already be installed. Termux has no service manager configured by this installer, so the agent runs in a foreground session.
 - The tagged-release workflow publishes Linux amd64/arm64 assets and `SHA256SUMS`; no published release is currently available. Until one is published, Linux and Termux offer the disclosed Go source-build path. Source builds require outbound HTTPS and Go module access. A source snapshot is not signed or checksummed.
@@ -50,8 +52,6 @@ unset IPV8_ADMIN_EMAIL IPV8_ADMIN_PASSWORD IPV8_ADMIN_CONFIRM
 
 Use the selected installation prefix in place of `/usr/local/bin/ipv8` if changed. Start the panel even if bootstrap reports that an admin already exists. For local development the shorter environment-based bootstrap command above uses the local `IPV8_DATA` path.
 
-The app creates its configured JSON database on first write. Keep it private and stop the single-process server before copying it. See `.env.example` for placeholder configuration names; the app does not load `.env` automatically.
-
 ## Configuration and deployment
 
 Configure the app in its process/service environment:
@@ -89,7 +89,13 @@ In the account panel, **Install IPv8** creates a 15-minute, one-use enrollment t
 
 On Linux the installer installs `/usr/local/bin/ipv8` (or the selected prefix), `/etc/ipv8/agent.json` mode `0600`, and a managed systemd unit. Existing credentials are preserved; unrelated files and symlinks are refused. The service reports status only through authenticated heartbeats. On Termux it installs under `$PREFIX`, creates no Android service, and prints the foreground command to start the agent. No route, firewall, DNS, or other system networking configuration is changed.
 
-The installer requires an interactive terminal for review and token entry. To inspect the source without executing it, run `curl -fsSL https://raw.githubusercontent.com/mryuvraj1/ipv8/main/install.sh | less`. The one-line command above uses Bash process substitution and does not need the script's directory.
+The installer requires an interactive terminal for review and token entry. To inspect the source without executing it, page through it instead:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/mryuvraj1/ipv8/main/install.sh | less
+```
+
+The one-line command above uses Bash process substitution and does not need the script's directory.
 
 Use menu option 4 to uninstall the agent or option 5 to uninstall the panel. The utility stops and disables only the managed IPv8 service, removes its unit, and keeps agent credentials, panel configuration, and database by default. Database deletion requires a separate exact `DELETE` confirmation. Revoke an agent in **My IPv8** before removing its local credentials where possible. In Termux, stop the foreground agent with Ctrl+C and revoke it in the panel before deleting its user-local files manually. The manager does not remove backups or Cloudflare Tunnel configuration.
 
